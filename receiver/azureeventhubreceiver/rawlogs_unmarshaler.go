@@ -12,29 +12,35 @@ import (
 	"go.uber.org/zap"
 )
 
-type rawLogsUnmarshaler struct {
+type rawLogsUnmarshaler[T any] struct {
 	logger *zap.Logger
 }
 
-func newRawLogsUnmarshaler(logger *zap.Logger) eventLogsUnmarshaler {
-	return rawLogsUnmarshaler{
+func newRawLogsUnmarshaler(logger *zap.Logger) eventLogsUnmarshaler[*eventhub.Event] {
+	return &rawLogsUnmarshaler[*eventhub.Event]{
 		logger: logger,
 	}
 }
 
-func (rawLogsUnmarshaler) UnmarshalLogs(event *eventhub.Event) (plog.Logs, error) {
-	l := plog.NewLogs()
-	lr := l.ResourceLogs().AppendEmpty().ScopeLogs().AppendEmpty().LogRecords().AppendEmpty()
-	slice := lr.Body().SetEmptyBytes()
-	slice.Append(event.Data...)
-	lr.SetObservedTimestamp(pcommon.NewTimestampFromTime(time.Now()))
-	if event.SystemProperties.EnqueuedTime != nil {
-		lr.SetTimestamp(pcommon.NewTimestampFromTime(*event.SystemProperties.EnqueuedTime))
-	}
+func (r *rawLogsUnmarshaler[T]) UnmarshalLogs(event T) (plog.Logs, error) {
+	// Type assertion to handle the specific case for *eventhub.Event
+	if eventhubEvent, ok := any(event).(*eventhub.Event); ok {
+		l := plog.NewLogs()
+		lr := l.ResourceLogs().AppendEmpty().ScopeLogs().AppendEmpty().LogRecords().AppendEmpty()
+		slice := lr.Body().SetEmptyBytes()
+		slice.Append(eventhubEvent.Data...)
+		lr.SetObservedTimestamp(pcommon.NewTimestampFromTime(time.Now()))
+		if eventhubEvent.SystemProperties.EnqueuedTime != nil {
+			lr.SetTimestamp(pcommon.NewTimestampFromTime(*eventhubEvent.SystemProperties.EnqueuedTime))
+		}
 
-	if err := lr.Attributes().FromRaw(event.Properties); err != nil {
-		return l, err
-	}
+		if err := lr.Attributes().FromRaw(eventhubEvent.Properties); err != nil {
+			return l, err
+		}
 
-	return l, nil
+		return l, nil
+	}
+	
+	// Return empty logs for unsupported types
+	return plog.NewLogs(), nil
 }

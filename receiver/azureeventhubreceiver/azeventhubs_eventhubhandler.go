@@ -1,13 +1,10 @@
-// Copyright The OpenTelemetry Authors
-// SPDX-License-Identifier: Apache-2.0
-
-package azureeventhubreceiver // import "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/azureeventhubreceiver"
+package azureeventhubreceiver
 
 import (
 	"context"
 	"errors"
 
-	eventhub "github.com/Azure/azure-event-hubs-go/v3"
+	azeventhubs "github.com/Azure/azure-sdk-for-go/sdk/messaging/azeventhubs/v2"
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/extension/xextension/storage"
 	"go.opentelemetry.io/collector/receiver"
@@ -16,44 +13,35 @@ import (
 	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/stanza/adapter"
 )
 
-type hubWrapper interface {
-	GetRuntimeInformation(ctx context.Context) (*eventhub.HubRuntimeInformation, error)
-	Receive(ctx context.Context, partitionID string, handler eventhub.Handler, opts ...eventhub.ReceiveOption) (listerHandleWrapper, error)
-	Close(ctx context.Context) error
+type azEventHubWrapperImpl struct {
+	client *azeventhubs.ConsumerClient
 }
 
-type hubWrapperImpl struct {
-	hub *eventhub.Hub
+func (h *azEventHubWrapperImpl) GetRuntimeInformation(ctx context.Context) (azeventhubs.EventHubProperties, error) {
+	return h.client.GetEventHubProperties(ctx, nil)
 }
 
-func (h *hubWrapperImpl) GetRuntimeInformation(ctx context.Context) (*eventhub.HubRuntimeInformation, error) {
-	return h.hub.GetRuntimeInformation(ctx)
+func (h *azEventHubWrapperImpl) Receive(ctx context.Context, partitionID string, handler azeventhubs.Handler, opts ...azeventhubs.ReceiveOption) (listerHandleWrapper, error) {
+	//l, err := h.hub.Receive(ctx, partitionID, handler, opts...)
+	//return l, err
+	//TODO: Implement this
+	return nil, nil
 }
 
-func (h *hubWrapperImpl) Receive(ctx context.Context, partitionID string, handler eventhub.Handler, opts ...eventhub.ReceiveOption) (listerHandleWrapper, error) {
-	l, err := h.hub.Receive(ctx, partitionID, handler, opts...)
-	return l, err
+func (h *azEventHubWrapperImpl) Close(ctx context.Context) error {
+	return h.client.Close(ctx)
 }
 
-func (h *hubWrapperImpl) Close(ctx context.Context) error {
-	return h.hub.Close(ctx)
-}
-
-type listerHandleWrapper interface {
-	Done() <-chan struct{}
-	Err() error
-}
-
-type eventhubHandler[T any] struct {
+type azEventHubHandler struct {
 	hub           hubWrapper
-	dataConsumer  dataConsumer[T]
+	dataConsumer  dataConsumer[*azeventhubs.EventData]
 	config        *Config
 	settings      receiver.Settings
 	cancel        context.CancelFunc
 	storageClient storage.Client
 }
 
-func (h *eventhubHandler[T]) run(ctx context.Context, host component.Host) error {
+func (h *azEventHubHandler) run(ctx context.Context, host component.Host) error {
 	ctx, h.cancel = context.WithCancel(ctx)
 
 	if h.storageClient == nil { // set manually for testing.
@@ -66,12 +54,12 @@ func (h *eventhubHandler[T]) run(ctx context.Context, host component.Host) error
 	}
 
 	if h.hub == nil { // set manually for testing.
-		hub, newHubErr := eventhub.NewHubFromConnectionString(h.config.Connection, eventhub.HubWithOffsetPersistence(&storageCheckpointPersister{storageClient: h.storageClient}))
+		hub, newHubErr := azeventhubs.NewConsumerClientFromConnectionString(h.config.Connection, h.config.ConsumerGroup, azeventhubs.ClientWithOffsetPersistence(&storageCheckpointPersister{storageClient: h.storageClient}))
 		if newHubErr != nil {
 			h.settings.Logger.Debug("Error connecting to Event Hub", zap.Error(newHubErr))
 			return newHubErr
 		}
-		h.hub = &hubWrapperImpl{hub: hub}
+		h.hub = &azEventHubWrapperImpl{client: hub}
 	}
 
 	if h.config.Partition != "" {
@@ -100,14 +88,14 @@ func (h *eventhubHandler[T]) run(ctx context.Context, host component.Host) error
 	return errors.Join(errs...)
 }
 
-func (h *eventhubHandler[T]) setUpOnePartition(ctx context.Context, partitionID string, applyOffset bool) error {
-	receiverOptions := []eventhub.ReceiveOption{}
+func (h *azEventHubHandler) setUpOnePartition(ctx context.Context, partitionID string, applyOffset bool) error {
+	receiverOptions := []azeventhubs.ReceiveOption{}
 	if applyOffset && h.config.Offset != "" {
-		receiverOptions = append(receiverOptions, eventhub.ReceiveWithStartingOffset(h.config.Offset))
+		receiverOptions = append(receiverOptions, azeventhubs.ReceiveWithStartingOffset(h.config.Offset))
 	}
 
 	if h.config.ConsumerGroup != "" {
-		receiverOptions = append(receiverOptions, eventhub.ReceiveWithConsumerGroup(h.config.ConsumerGroup))
+		receiverOptions = append(receiverOptions, azeventhubs.ReceiveWithConsumerGroup(h.config.ConsumerGroup))
 	}
 
 	handle, err := h.hub.Receive(ctx, partitionID, h.newMessageHandler, receiverOptions...)
@@ -125,13 +113,8 @@ func (h *eventhubHandler[T]) setUpOnePartition(ctx context.Context, partitionID 
 	return nil
 }
 
-func (h *eventhubHandler[T]) newMessageHandler(ctx context.Context, event *eventhub.Event) error {
-	// Convert the old eventhub.Event to the generic type T
-	// This is a temporary solution - in practice, you might want to create a proper adapter
-	var genericEvent T
-	// For now, we'll need to handle this conversion properly
-	// This is a placeholder - the actual implementation will depend on how T is defined
-	err := h.dataConsumer.consume(ctx, genericEvent)
+func (h *azEventHubHandler) newMessageHandler(ctx context.Context, event *azeventhubs.Event) error {
+	err := h.dataConsumer.consume(ctx, event)
 	if err != nil {
 		h.settings.Logger.Error("error decoding message", zap.Error(err))
 		return err
@@ -140,7 +123,7 @@ func (h *eventhubHandler[T]) newMessageHandler(ctx context.Context, event *event
 	return nil
 }
 
-func (h *eventhubHandler[T]) close(ctx context.Context) error {
+func (h *azEventHubHandler) close(ctx context.Context) error {
 	var errs error
 	if h.storageClient != nil {
 		if err := h.storageClient.Close(ctx); err != nil {
@@ -163,12 +146,12 @@ func (h *eventhubHandler[T]) close(ctx context.Context) error {
 	return errs
 }
 
-func (h *eventhubHandler[T]) setDataConsumer(dataConsumer dataConsumer[T]) {
+func (h *azEventHubHandler) setDataConsumer(dataConsumer dataConsumer[*azeventhubs.Event]) {
 	h.dataConsumer = dataConsumer
 }
 
-func newEventhubHandler[T any](config *Config, settings receiver.Settings) *eventhubHandler[T] {
-	return &eventhubHandler[T]{
+func newAzEventHubHandler(config *Config, settings receiver.Settings) *azEventHubHandler {
+	return &azEventHubHandler{
 		config:   config,
 		settings: settings,
 	}

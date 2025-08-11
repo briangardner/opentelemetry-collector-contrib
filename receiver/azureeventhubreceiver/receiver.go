@@ -22,59 +22,65 @@ import (
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/azureeventhubreceiver/internal/metadata"
 )
 
-type dataConsumer interface {
-	consume(ctx context.Context, event *eventhub.Event) error
+type dataConsumer[T any] interface {
+	consume(ctx context.Context, event T) error
 	setNextLogsConsumer(nextLogsConsumer consumer.Logs)
 	setNextMetricsConsumer(nextLogsConsumer consumer.Metrics)
 	setNextTracesConsumer(nextTracesConsumer consumer.Traces)
 }
 
-type eventLogsUnmarshaler interface {
-	UnmarshalLogs(event *eventhub.Event) (plog.Logs, error)
+// EventHubReceiver defines the interface for Azure Event Hub receivers
+type EventHubReceiver[T any] interface {
+	component.Component
+	dataConsumer[T]
 }
 
-type eventMetricsUnmarshaler interface {
-	UnmarshalMetrics(event *eventhub.Event) (pmetric.Metrics, error)
+type eventLogsUnmarshaler[T any] interface {
+	UnmarshalLogs(event T) (plog.Logs, error)
 }
 
-type eventTracesUnmarshaler interface {
-	UnmarshalTraces(event *eventhub.Event) (ptrace.Traces, error)
+type eventMetricsUnmarshaler[T any] interface {
+	UnmarshalMetrics(event T) (pmetric.Metrics, error)
 }
 
-type eventhubReceiver struct {
-	eventHandler        *eventhubHandler
+type eventTracesUnmarshaler[T any] interface {
+	UnmarshalTraces(event T) (ptrace.Traces, error)
+}
+
+type defaultEventHubReceiver[T any] struct {
+	eventHandler        *eventhubHandler[T]
 	signal              pipeline.Signal
 	logger              *zap.Logger
-	logsUnmarshaler     eventLogsUnmarshaler
-	metricsUnmarshaler  eventMetricsUnmarshaler
-	tracesUnmarshaler   eventTracesUnmarshaler
+	logsUnmarshaler     eventLogsUnmarshaler[T]
+	metricsUnmarshaler  eventMetricsUnmarshaler[T]
+	tracesUnmarshaler   eventTracesUnmarshaler[T]
 	nextLogsConsumer    consumer.Logs
 	nextMetricsConsumer consumer.Metrics
 	nextTracesConsumer  consumer.Traces
 	obsrecv             *receiverhelper.ObsReport
 }
 
-func (receiver *eventhubReceiver) Start(ctx context.Context, host component.Host) error {
+func (receiver *defaultEventHubReceiver[T]) Start(ctx context.Context, host component.Host) error {
 	return receiver.eventHandler.run(ctx, host)
 }
 
-func (receiver *eventhubReceiver) Shutdown(ctx context.Context) error {
+func (receiver *defaultEventHubReceiver[T]) Shutdown(ctx context.Context) error {
 	return receiver.eventHandler.close(ctx)
 }
 
-func (receiver *eventhubReceiver) setNextLogsConsumer(nextLogsConsumer consumer.Logs) {
+func (receiver *defaultEventHubReceiver[T]) setNextLogsConsumer(nextLogsConsumer consumer.Logs) {
 	receiver.nextLogsConsumer = nextLogsConsumer
 }
 
-func (receiver *eventhubReceiver) setNextMetricsConsumer(nextMetricsConsumer consumer.Metrics) {
+func (receiver *defaultEventHubReceiver[T]) setNextMetricsConsumer(nextMetricsConsumer consumer.Metrics) {
 	receiver.nextMetricsConsumer = nextMetricsConsumer
 }
 
-func (receiver *eventhubReceiver) setNextTracesConsumer(nextTracesConsumer consumer.Traces) {
+func (receiver *defaultEventHubReceiver[T]) setNextTracesConsumer(nextTracesConsumer consumer.Traces) {
 	receiver.nextTracesConsumer = nextTracesConsumer
 }
 
-func (receiver *eventhubReceiver) consume(ctx context.Context, event *eventhub.Event) error {
+func (receiver *defaultEventHubReceiver[T]) consume(ctx context.Context, event T) error {
 	switch receiver.signal {
 	case pipeline.SignalLogs:
 		return receiver.consumeLogs(ctx, event)
@@ -87,7 +93,7 @@ func (receiver *eventhubReceiver) consume(ctx context.Context, event *eventhub.E
 	}
 }
 
-func (receiver *eventhubReceiver) consumeLogs(ctx context.Context, event *eventhub.Event) error {
+func (receiver *defaultEventHubReceiver[T]) consumeLogs(ctx context.Context, event T) error {
 	if receiver.nextLogsConsumer == nil {
 		return nil
 	}
@@ -110,7 +116,7 @@ func (receiver *eventhubReceiver) consumeLogs(ctx context.Context, event *eventh
 	return err
 }
 
-func (receiver *eventhubReceiver) consumeMetrics(ctx context.Context, event *eventhub.Event) error {
+func (receiver *defaultEventHubReceiver[T]) consumeMetrics(ctx context.Context, event T) error {
 	if receiver.nextMetricsConsumer == nil {
 		return nil
 	}
@@ -134,7 +140,7 @@ func (receiver *eventhubReceiver) consumeMetrics(ctx context.Context, event *eve
 	return err
 }
 
-func (receiver *eventhubReceiver) consumeTraces(ctx context.Context, event *eventhub.Event) error {
+func (receiver *defaultEventHubReceiver[T]) consumeTraces(ctx context.Context, event T) error {
 	if receiver.nextTracesConsumer == nil {
 		return nil
 	}
@@ -160,10 +166,40 @@ func (receiver *eventhubReceiver) consumeTraces(ctx context.Context, event *even
 
 func newReceiver(
 	signal pipeline.Signal,
-	logsUnmarshaler eventLogsUnmarshaler,
-	metricsUnmarshaler eventMetricsUnmarshaler,
-	tracesUnmarshaler eventTracesUnmarshaler,
-	eventHandler *eventhubHandler,
+	logsUnmarshaler eventLogsUnmarshaler[*eventhub.Event],
+	metricsUnmarshaler eventMetricsUnmarshaler[*eventhub.Event],
+	tracesUnmarshaler eventTracesUnmarshaler[*eventhub.Event],
+	eventHandler *eventhubHandler[*eventhub.Event],
+	settings receiver.Settings,
+) (component.Component, error) {
+
+	if useAzEventHubsFeatureGate.IsEnabled() {
+		return newAzEventHubsReceiver(signal, logsUnmarshaler, metricsUnmarshaler, tracesUnmarshaler, eventHandler, settings)
+	}
+
+	return newLegacyEventHubsReceiver(signal, logsUnmarshaler, metricsUnmarshaler, tracesUnmarshaler, eventHandler, settings)
+
+}
+
+// newAzEventHubsReceiver is the new receiver that uses the `azeventhubs` client.
+func newAzEventHubsReceiver(
+	signal pipeline.Signal,
+	logsUnmarshaler eventLogsUnmarshaler[*eventhub.Event],
+	metricsUnmarshaler eventMetricsUnmarshaler[*eventhub.Event],
+	tracesUnmarshaler eventTracesUnmarshaler[*eventhub.Event],
+	eventHandler *eventhubHandler[*eventhub.Event],
+	settings receiver.Settings,
+) (component.Component, error) {
+	return nil, nil
+}
+
+// newLegacyEventHubsReceiver is the legacy receiver that uses the `azure-event-hubs-go/v3` client.
+func newLegacyEventHubsReceiver(
+	signal pipeline.Signal,
+	logsUnmarshaler eventLogsUnmarshaler[*eventhub.Event],
+	metricsUnmarshaler eventMetricsUnmarshaler[*eventhub.Event],
+	tracesUnmarshaler eventTracesUnmarshaler[*eventhub.Event],
+	eventHandler *eventhubHandler[*eventhub.Event],
 	settings receiver.Settings,
 ) (component.Component, error) {
 	obsrecv, err := receiverhelper.NewObsReport(receiverhelper.ObsReportSettings{
@@ -175,7 +211,7 @@ func newReceiver(
 		return nil, err
 	}
 
-	eventhubReceiver := &eventhubReceiver{
+	eventhubReceiver := &defaultEventHubReceiver[*eventhub.Event]{
 		signal:             signal,
 		eventHandler:       eventHandler,
 		logger:             settings.Logger,

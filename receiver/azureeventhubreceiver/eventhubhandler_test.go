@@ -55,26 +55,25 @@ func (mockListenerHandleWrapper) Err() error {
 	return nil
 }
 
-type mockDataConsumer struct {
-	logsUnmarshaler    eventLogsUnmarshaler
+type mockDataConsumer[T any] struct {
+	logsUnmarshaler    eventLogsUnmarshaler[T]
 	nextLogsConsumer   consumer.Logs
 	nextTracesConsumer consumer.Traces
 	obsrecv            *receiverhelper.ObsReport
 }
 
-func (m *mockDataConsumer) setNextLogsConsumer(nextLogsConsumer consumer.Logs) {
+func (m *mockDataConsumer[T]) setNextLogsConsumer(nextLogsConsumer consumer.Logs) {
 	m.nextLogsConsumer = nextLogsConsumer
 }
 
-func (m *mockDataConsumer) setNextTracesConsumer(nextTracesConsumer consumer.Traces) {
+func (m *mockDataConsumer[T]) setNextTracesConsumer(nextTracesConsumer consumer.Traces) {
 	m.nextTracesConsumer = nextTracesConsumer
 }
 
-func (*mockDataConsumer) setNextMetricsConsumer(consumer.Metrics) {}
+func (*mockDataConsumer[T]) setNextMetricsConsumer(consumer.Metrics) {}
 
-func (m *mockDataConsumer) consume(ctx context.Context, event *eventhub.Event) error {
+func (m *mockDataConsumer[T]) consume(ctx context.Context, event T) error {
 	logsContext := m.obsrecv.StartLogsOp(ctx)
-
 	logs, err := m.logsUnmarshaler.UnmarshalLogs(event)
 	if err != nil {
 		return err
@@ -90,9 +89,9 @@ func TestEventhubHandler_Start(t *testing.T) {
 	config := createDefaultConfig()
 	config.(*Config).Connection = "Endpoint=sb://namespace.servicebus.windows.net/;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=superSecret1234=;EntityPath=hubName"
 
-	ehHandler := &eventhubHandler{
+	ehHandler := &eventhubHandler[*eventhub.Event]{
 		settings:     receivertest.NewNopSettings(metadata.Type),
-		dataConsumer: &mockDataConsumer{},
+		dataConsumer: &mockDataConsumer[*eventhub.Event]{},
 		config:       config.(*Config),
 	}
 	ehHandler.hub = &mockHubWrapper{}
@@ -114,10 +113,10 @@ func TestEventhubHandler_newMessageHandler(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	ehHandler := &eventhubHandler{
+	ehHandler := &eventhubHandler[*eventhub.Event]{
 		settings: receivertest.NewNopSettings(metadata.Type),
 		config:   config.(*Config),
-		dataConsumer: &mockDataConsumer{
+		dataConsumer: &mockDataConsumer[*eventhub.Event]{
 			logsUnmarshaler:  newRawLogsUnmarshaler(zap.NewNop()),
 			nextLogsConsumer: sink,
 			obsrecv:          obsrecv,
@@ -158,9 +157,9 @@ func TestEventhubHandler_closeWithStorageClient(t *testing.T) {
 	config := createDefaultConfig()
 	config.(*Config).Connection = "Endpoint=sb://namespace.servicebus.windows.net/;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=superSecret1234=;EntityPath=hubName"
 
-	ehHandler := &eventhubHandler{
+	ehHandler := &eventhubHandler[*eventhub.Event]{
 		settings:     receivertest.NewNopSettings(metadata.Type),
-		dataConsumer: &mockDataConsumer{},
+		dataConsumer: &mockDataConsumer[*eventhub.Event]{},
 		config:       config.(*Config),
 	}
 	ehHandler.hub = &mockHubWrapper{}

@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 
+	eventhub "github.com/Azure/azure-event-hubs-go/v3"
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/consumer"
 	"go.opentelemetry.io/collector/pipeline"
@@ -52,7 +53,7 @@ func (f *eventhubReceiverFactory) createLogsReceiver(
 		return nil, err
 	}
 
-	receiver.(dataConsumer).setNextLogsConsumer(nextConsumer)
+	receiver.(dataConsumer[*eventhub.Event]).setNextLogsConsumer(nextConsumer)
 
 	return receiver, nil
 }
@@ -68,7 +69,7 @@ func (f *eventhubReceiverFactory) createMetricsReceiver(
 		return nil, err
 	}
 
-	receiver.(dataConsumer).setNextMetricsConsumer(nextConsumer)
+	receiver.(dataConsumer[*eventhub.Event]).setNextMetricsConsumer(nextConsumer)
 
 	return receiver, nil
 }
@@ -84,7 +85,7 @@ func (f *eventhubReceiverFactory) createTracesReceiver(
 		return nil, err
 	}
 
-	receiver.(dataConsumer).setNextTracesConsumer(nextConsumer)
+	receiver.(dataConsumer[*eventhub.Event]).setNextTracesConsumer(nextConsumer)
 
 	return receiver, nil
 }
@@ -102,9 +103,9 @@ func (f *eventhubReceiverFactory) getReceiver(
 			return nil
 		}
 
-		var logsUnmarshaler eventLogsUnmarshaler
-		var metricsUnmarshaler eventMetricsUnmarshaler
-		var tracesUnmarshaler eventTracesUnmarshaler
+		var logsUnmarshaler eventLogsUnmarshaler[*eventhub.Event]
+		var metricsUnmarshaler eventMetricsUnmarshaler[*eventhub.Event]
+		var tracesUnmarshaler eventTracesUnmarshaler[*eventhub.Event]
 		switch signal {
 		case pipeline.SignalLogs:
 			if logFormat(receiverConfig.Format) == rawLogFormat {
@@ -132,7 +133,7 @@ func (f *eventhubReceiverFactory) getReceiver(
 			return nil
 		}
 
-		eventHandler := newEventhubHandler(receiverConfig, settings)
+		eventHandler := newEventhubHandler[*eventhub.Event](receiverConfig, settings)
 
 		var rcvr component.Component
 		rcvr, err = newReceiver(signal, logsUnmarshaler, metricsUnmarshaler, tracesUnmarshaler, eventHandler, settings)
